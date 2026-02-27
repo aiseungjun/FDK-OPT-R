@@ -139,12 +139,12 @@ def main() -> None:
     peak_tag = _fmt_float(peak)
 
     methods: List[Tuple[str, str]] = [
-        ("FDK-OPT+R", f"fdk-opt+r-{dose_tag}-{peak_tag}"),
+        ("FDK-OPT+R", f"fdk-optr-{dose_tag}-{peak_tag}"),
         ("UNet-N2V", f"unet-n2v-{dose_tag}-{peak_tag}"),
         ("UNet-R2R", f"unet-r2r-{dose_tag}-{peak_tag}"),
         ("NAFNet", f"nafnet-n2c-{dose_tag}-{peak_tag}"),
         ("UNet-N2C", f"unet-n2c-{dose_tag}-{peak_tag}"),
-        ("UNet-OPT+R", f"unet-opt+r-{dose_tag}-{peak_tag}"),
+        ("UNet-OPT+R", f"unet-optr-{dose_tag}-{peak_tag}"),
     ]
 
     print(f"[Edge eval] dataset={dataset_tag} root={root} device={device}")

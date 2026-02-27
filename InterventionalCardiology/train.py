@@ -10,9 +10,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
-from torch.utils.data import DataLoader
 
 from data import (
+    CARDIAC_SPLIT_SEED,
     DEFAULT_LOW_DOSE_CFG,
     get_dataloaders,
     get_frame_groups,
@@ -36,7 +36,7 @@ from model import (
 
 
 CARDIAC_PATCH_SIZE = 256
-CARDIAC_TRAIN_SAMPLES_PER_EPOCH = 1500
+CARDIAC_TRAIN_SAMPLES_PER_EPOCH = 3000
 CARDIAC_VAL_SAMPLES_PER_EPOCH = 500
 
 OPT_RISK_INPUT_WEIGHT = 0.1
@@ -49,13 +49,13 @@ def _fmt_float(value: float) -> str:
 
 def _normalize_mode_alias(mode: str) -> str:
     mode = str(mode).lower()
-    if mode in {"opt+r"}:
-        return "opt+r"
+    if mode in {"opt", "optr", "opt+r"}:
+        return "opt"
     return mode
 
 
 def _is_opt_mode(mode: str) -> bool:
-    return _normalize_mode_alias(mode) == "opt+r"
+    return _normalize_mode_alias(mode) == "opt"
 
 
 def _mode_tag(mode: str, use_opt_risk: bool) -> str:
@@ -66,7 +66,7 @@ def _mode_tag(mode: str, use_opt_risk: bool) -> str:
 
 def _use_perceptual(mode: str, perceptual_weight: float) -> bool:
     mode = _normalize_mode_alias(mode)
-    return mode in {"pretrain", "opt+r"} and perceptual_weight > 0.0
+    return mode in {"pretrain", "opt"} and perceptual_weight > 0.0
 
 
 class VGGPerceptualLoss(nn.Module):
@@ -293,24 +293,26 @@ def compute_loss(
     target_pos: int | None = None,
     risk: torch.Tensor | None = None,
     noisy_input: torch.Tensor | None = None,
-    unc_eps: float = 1e-3,
-    unc_power: float = 1.0,
-    unc_max_weight: float = 4.0,
+    risk_eps: float = 1e-3,
+    risk_power: float = 1.0,
+    # NOTE: By default we do NOT clip the risk-derived weights.
+    # Set a positive value (e.g., 4.0) to enable max-clipping.
+    risk_max_weight: float = 0.0,
 ) -> torch.Tensor:
     output = _select_center_if_burst(output, burst_size, target_pos)
     target_center = _select_center_if_burst(target, burst_size, target_pos)
     if mask is None:
         if risk is None:
             return nn.functional.mse_loss(output, target_center)
-        unc = _select_center_if_burst(risk, burst_size, target_pos)
-        w = 1.0 / (unc_eps + torch.clamp(unc, min=0.0))
-        if unc_power != 1.0:
-            w = w.pow(unc_power)
+        risk_center = _select_center_if_burst(risk, burst_size, target_pos)
+        w = 1.0 / (risk_eps + torch.clamp(risk_center, min=0.0))
+        if risk_power != 1.0:
+            w = w.pow(risk_power)
 
         w_mean = w.mean(dim=(-2, -1), keepdim=True)
         w = w / (w_mean + 1e-6)
-        if unc_max_weight > 0:
-            w = torch.clamp(w, max=float(unc_max_weight))
+        if risk_max_weight > 0:
+            w = torch.clamp(w, max=float(risk_max_weight))
         hetero = (w * (output - target_center) ** 2).mean()
         if noisy_input is None:
             return hetero
@@ -319,8 +321,8 @@ def compute_loss(
         w_input = 1.0 / (w + 1e-6)
         w_input_mean = w_input.mean(dim=(-2, -1), keepdim=True)
         w_input = w_input / (w_input_mean + 1e-6)
-        if unc_max_weight > 0:
-            w_input = torch.clamp(w_input, max=float(unc_max_weight))
+        if risk_max_weight > 0:
+            w_input = torch.clamp(w_input, max=float(risk_max_weight))
         input_consistency = (w_input * (output - input_center) ** 2).mean()
         return hetero + float(OPT_RISK_INPUT_WEIGHT) * input_consistency
     mask = mask.bool()
@@ -535,15 +537,6 @@ def _resolve_sample_budget(sample_budget: int | None, dataset_size: int) -> int 
     return n
 
 
-def _make_random_val_loader(base_loader, batch_size: int, num_workers: int):
-    return DataLoader(
-        base_loader.dataset,
-        batch_size=int(batch_size),
-        shuffle=True,
-        num_workers=int(num_workers),
-    )
-
-
 def _set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
@@ -564,9 +557,10 @@ def _train_one_epoch(
     opt,
     *,
     use_risk: bool = False,
-    unc_eps: float = 1e-3,
-    unc_power: float = 1.0,
-    unc_max_weight: float = 4.0,
+    risk_eps: float = 1e-3,
+    risk_power: float = 1.0,
+    # Default: no clipping for OPT+R risk-derived weights.
+    risk_max_weight: float = 0.0,
     perceptual_loss_fn: nn.Module | None = None,
     perceptual_weight: float = 0.0,
     opt_l1_weight: float = 0.0,
@@ -609,9 +603,9 @@ def _train_one_epoch(
             target_pos=target_pos,
             risk=unc if use_risk else None,
             noisy_input=inp,
-            unc_eps=unc_eps,
-            unc_power=unc_power,
-            unc_max_weight=unc_max_weight,
+            risk_eps=risk_eps,
+            risk_power=risk_power,
+            risk_max_weight=risk_max_weight,
         )
         if perceptual_loss_fn is not None and perceptual_weight > 0.0:
             loss = loss + perceptual_weight * _compute_perceptual_loss(
@@ -621,7 +615,7 @@ def _train_one_epoch(
                 perceptual_loss_fn,
                 target_pos=target_pos,
             )
-        if mode == "opt+r":
+        if mode == "opt":
             out_center = _select_center_if_burst(output, burst_size, target_pos)
             tgt_center = _select_center_if_burst(target, burst_size, target_pos)
             if opt_l1_weight > 0:
@@ -681,9 +675,10 @@ def _eval_one_epoch(
     burst_size,
     *,
     use_risk: bool = False,
-    unc_eps: float = 1e-3,
-    unc_power: float = 1.0,
-    unc_max_weight: float = 4.0,
+    risk_eps: float = 1e-3,
+    risk_power: float = 1.0,
+    # Default: no clipping for OPT+R risk-derived weights.
+    risk_max_weight: float = 0.0,
     perceptual_loss_fn: nn.Module | None = None,
     perceptual_weight: float = 0.0,
     opt_l1_weight: float = 0.0,
@@ -725,9 +720,9 @@ def _eval_one_epoch(
                 target_pos=target_pos,
                 risk=unc if use_risk else None,
                 noisy_input=inp,
-                unc_eps=unc_eps,
-                unc_power=unc_power,
-                unc_max_weight=unc_max_weight,
+                risk_eps=risk_eps,
+                risk_power=risk_power,
+                risk_max_weight=risk_max_weight,
             )
             if perceptual_loss_fn is not None and perceptual_weight > 0.0:
                 loss = loss + perceptual_weight * _compute_perceptual_loss(
@@ -737,7 +732,7 @@ def _eval_one_epoch(
                     perceptual_loss_fn,
                     target_pos=target_pos,
                 )
-            if mode == "opt+r":
+            if mode == "opt":
                 out_center = _select_center_if_burst(output, burst_size, target_pos)
                 tgt_center = _select_center_if_burst(target, burst_size, target_pos)
                 if opt_l1_weight > 0:
@@ -887,7 +882,7 @@ def main():
     parser.add_argument(
         "--mode",
         default="n2c",
-        choices=["n2c", "n2v", "n2self", "r2r", "pretrain", "opt+r"],
+        choices=["n2c", "n2v", "n2self", "r2r", "pretrain", "opt", "optr", "opt+r"],
     )
     parser.add_argument("--epochs", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=24)
@@ -937,7 +932,7 @@ def main():
     parser.add_argument(
         "--fdk_stage1_mode_opt",
         default="opt+r",
-        choices=["opt+r", "n2v", "n2self", "r2r"],
+        choices=["opt", "optr", "opt+r", "n2v", "n2self", "r2r"],
     )
     parser.add_argument("--fdk_stage2_joint_spatial", action="store_true")
     parser.add_argument("--fdk_stage2_lr_scale", type=float, default=0.3)
@@ -991,7 +986,12 @@ def main():
     parser.add_argument("--opt_use_risk", action="store_true")
     parser.add_argument("--opt_risk_eps", type=float, default=1e-3)
     parser.add_argument("--opt_risk_power", type=float, default=1.0)
-    parser.add_argument("--opt_risk_max_weight", type=float, default=4.0)
+    parser.add_argument(
+        "--opt_risk_max_weight",
+        type=float,
+        default=0.0,
+        help="Max clip for risk-derived weights in OPT+R. Set <=0 to disable clipping (default).",
+    )
     parser.add_argument("--opt_risk_input_weight", type=float, default=0.1)
     parser.add_argument("--opt_label_jitter", type=float, default=0.0)
     parser.add_argument("--opt_l1_weight", type=float, default=0.0)
@@ -1037,6 +1037,31 @@ def main():
             args.max_train_samples_per_epoch = int(CARDIAC_TRAIN_SAMPLES_PER_EPOCH)
         if args.max_val_samples_per_epoch is None:
             args.max_val_samples_per_epoch = int(CARDIAC_VAL_SAMPLES_PER_EPOCH)
+    cardiac_patient_train_budget = None
+    if (
+        dataset_tag == "cardiac"
+        and args.max_train_samples_per_epoch is not None
+        and int(args.max_train_samples_per_epoch) > 0
+    ):
+        cardiac_patient_train_budget = int(args.max_train_samples_per_epoch)
+        print(
+            "[info] Cardiac train sampling: patient-level accumulation to frame budget "
+            f"{cardiac_patient_train_budget} per epoch."
+        )
+    cardiac_patient_val_budget = None
+    cardiac_patient_val_seed = None
+    if (
+        dataset_tag == "cardiac"
+        and args.max_val_samples_per_epoch is not None
+        and int(args.max_val_samples_per_epoch) > 0
+    ):
+        cardiac_patient_val_budget = int(args.max_val_samples_per_epoch)
+        base_seed = CARDIAC_SPLIT_SEED if args.seed is None else int(args.seed)
+        cardiac_patient_val_seed = base_seed + 100003
+        print(
+            "[info] Cardiac validation sampling: patient-level accumulation to frame budget "
+            f"{cardiac_patient_val_budget} per epoch."
+        )
 
     fdk_kwargs = dict(
         width=args.fdk_width,
@@ -1100,7 +1125,7 @@ def main():
         _load_pretrained(model, args, dataset_tag)
 
     perceptual_loss_fn = None
-    if args.perceptual_weight > 0.0 and args.mode in {"pretrain", "opt+r"}:
+    if args.perceptual_weight > 0.0 and args.mode in {"pretrain", "opt"}:
         perceptual_loss_fn = VGGPerceptualLoss().to(device)
         perceptual_loss_fn.eval()
 
@@ -1119,10 +1144,10 @@ def main():
         temporal_smoothness_weight = args.fdk_temporal_smoothness_weight
         joint_epochs = max(0, int(args.fdk_temporal_joint_epochs))
 
-        stage1_mode = stage1_mode_opt if args.mode == "opt+r" else args.mode
+        stage1_mode = stage1_mode_opt if args.mode == "opt" else args.mode
         stage1_pretrain = stage1_mode == "pretrain"
         stage1_use_risk = (
-            args.opt_use_risk if stage1_mode == "opt+r" else False
+            args.opt_use_risk if stage1_mode == "opt" else False
         )
         stage1_use_perceptual = _use_perceptual(stage1_mode, args.perceptual_weight)
         model.set_temporal_trainable(False)
@@ -1140,18 +1165,30 @@ def main():
             noise_cfg=noise_cfg,
             burst_size=1,
             pretrain=stage1_pretrain,
-            opt_label_root=args.opt_label_root if stage1_mode == "opt+r" else None,
+            opt_label_root=args.opt_label_root if stage1_mode == "opt" else None,
             use_opt_risk=stage1_use_risk,
-            opt_label_jitter=args.opt_label_jitter if stage1_mode == "opt+r" else 0.0,
+            opt_label_jitter=args.opt_label_jitter if stage1_mode == "opt" else 0.0,
+            train_patient_frame_budget=cardiac_patient_train_budget,
+            train_patient_seed=args.seed,
+            val_patient_frame_budget=cardiac_patient_val_budget,
+            val_patient_seed=cardiac_patient_val_seed,
         )
         stage1_max_batches = _resolve_max_train_batches(
             train_loader, args.train_batch_fraction
         )
-        stage1_max_samples = _resolve_sample_budget(
-            args.max_train_samples_per_epoch, len(train_loader.dataset)
+        stage1_max_samples = (
+            None
+            if cardiac_patient_train_budget is not None
+            else _resolve_sample_budget(
+                args.max_train_samples_per_epoch, len(train_loader.dataset)
+            )
         )
-        stage1_val_max_samples = _resolve_sample_budget(
-            args.max_val_samples_per_epoch, len(val_loader.dataset)
+        stage1_val_max_samples = (
+            None
+            if cardiac_patient_val_budget is not None
+            else _resolve_sample_budget(
+                args.max_val_samples_per_epoch, len(val_loader.dataset)
+            )
         )
         if stage1_max_samples is not None:
             print(
@@ -1163,10 +1200,11 @@ def main():
                 f"[info] Stage1 val sample budget per epoch: "
                 f"{stage1_val_max_samples}/{len(val_loader.dataset)}"
             )
-            if dataset_tag == "cardiac":
-                val_loader = _make_random_val_loader(
-                    val_loader, args.batch_size, args.num_workers
-                )
+        elif cardiac_patient_val_budget is not None:
+            print(
+                f"[info] Stage1 val sample budget per epoch (patient-level): "
+                f"{cardiac_patient_val_budget}/{len(val_loader.dataset)}"
+            )
 
         opt = Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
         step_size = _resolve_lr_step_size(
@@ -1187,17 +1225,17 @@ def main():
                 1,
                 opt,
                 use_risk=stage1_use_risk,
-                unc_eps=args.opt_risk_eps,
-                unc_power=args.opt_risk_power,
-                unc_max_weight=args.opt_risk_max_weight,
+                risk_eps=args.opt_risk_eps,
+                risk_power=args.opt_risk_power,
+                risk_max_weight=args.opt_risk_max_weight,
                 perceptual_loss_fn=perceptual_loss_fn
                 if stage1_use_perceptual
                 else None,
                 perceptual_weight=args.perceptual_weight
                 if stage1_use_perceptual
                 else 0.0,
-                opt_l1_weight=args.opt_l1_weight if stage1_mode == "opt+r" else 0.0,
-                opt_ssim_weight=args.opt_ssim_weight if stage1_mode == "opt+r" else 0.0,
+                opt_l1_weight=args.opt_l1_weight if stage1_mode == "opt" else 0.0,
+                opt_ssim_weight=args.opt_ssim_weight if stage1_mode == "opt" else 0.0,
                 scheduler=scheduler,
                 max_batches=stage1_max_batches,
                 max_samples=stage1_max_samples,
@@ -1211,18 +1249,18 @@ def main():
                     noise_cfg,
                     1,
                     use_risk=stage1_use_risk,
-                    unc_eps=args.opt_risk_eps,
-                    unc_power=args.opt_risk_power,
-                    unc_max_weight=args.opt_risk_max_weight,
+                    risk_eps=args.opt_risk_eps,
+                    risk_power=args.opt_risk_power,
+                    risk_max_weight=args.opt_risk_max_weight,
                     perceptual_loss_fn=perceptual_loss_fn
                     if stage1_use_perceptual
                     else None,
                     perceptual_weight=args.perceptual_weight
                     if stage1_use_perceptual
                     else 0.0,
-                    opt_l1_weight=args.opt_l1_weight if stage1_mode == "opt+r" else 0.0,
+                    opt_l1_weight=args.opt_l1_weight if stage1_mode == "opt" else 0.0,
                     opt_ssim_weight=args.opt_ssim_weight
-                    if stage1_mode == "opt+r"
+                    if stage1_mode == "opt"
                     else 0.0,
                     max_samples=stage1_val_max_samples,
                 )
@@ -1238,10 +1276,10 @@ def main():
         model.set_temporal_trainable(True)
         model.set_temporal_enabled(True)
 
-        stage2_mode = "opt+r" if args.mode == "opt+r" else args.mode
+        stage2_mode = "opt" if args.mode == "opt" else args.mode
         stage2_pretrain = stage2_mode == "pretrain"
         stage2_use_risk = (
-            args.opt_use_risk if stage2_mode == "opt+r" else False
+            args.opt_use_risk if stage2_mode == "opt" else False
         )
         stage2_use_perceptual = _use_perceptual(stage2_mode, args.perceptual_weight)
         stage2_epochs = args.opt_epochs or args.epochs
@@ -1260,22 +1298,34 @@ def main():
             noise_cfg=noise_cfg,
             burst_size=stage2_burst,
             pretrain=stage2_pretrain,
-            opt_label_root=args.opt_label_root if stage2_mode == "opt+r" else None,
+            opt_label_root=args.opt_label_root if stage2_mode == "opt" else None,
             use_opt_risk=stage2_use_risk,
-            opt_label_jitter=args.opt_label_jitter if stage2_mode == "opt+r" else 0.0,
+            opt_label_jitter=args.opt_label_jitter if stage2_mode == "opt" else 0.0,
             burst_align=False,
             burst_align_max_shift=10.0,
             burst_causal=True,
             burst_target="last",
+            train_patient_frame_budget=cardiac_patient_train_budget,
+            train_patient_seed=args.seed,
+            val_patient_frame_budget=cardiac_patient_val_budget,
+            val_patient_seed=cardiac_patient_val_seed,
         )
         stage2_max_batches = _resolve_max_train_batches(
             train_loader, args.train_batch_fraction
         )
-        stage2_max_samples = _resolve_sample_budget(
-            args.max_train_samples_per_epoch, len(train_loader.dataset)
+        stage2_max_samples = (
+            None
+            if cardiac_patient_train_budget is not None
+            else _resolve_sample_budget(
+                args.max_train_samples_per_epoch, len(train_loader.dataset)
+            )
         )
-        stage2_val_max_samples = _resolve_sample_budget(
-            args.max_val_samples_per_epoch, len(val_loader.dataset)
+        stage2_val_max_samples = (
+            None
+            if cardiac_patient_val_budget is not None
+            else _resolve_sample_budget(
+                args.max_val_samples_per_epoch, len(val_loader.dataset)
+            )
         )
         if stage2_max_samples is not None:
             print(
@@ -1287,10 +1337,11 @@ def main():
                 f"[info] Stage2 val sample budget per epoch: "
                 f"{stage2_val_max_samples}/{len(val_loader.dataset)}"
             )
-            if dataset_tag == "cardiac":
-                val_loader = _make_random_val_loader(
-                    val_loader, args.batch_size, args.num_workers
-                )
+        elif cardiac_patient_val_budget is not None:
+            print(
+                f"[info] Stage2 val sample budget per epoch (patient-level): "
+                f"{cardiac_patient_val_budget}/{len(val_loader.dataset)}"
+            )
 
         def _run_temporal_epochs(
             epochs: int, epoch_offset: int, total_epochs: int, label: str
@@ -1343,9 +1394,9 @@ def main():
                         target_pos=stage2_target_pos,
                         risk=unc if stage2_use_risk else None,
                         noisy_input=inp,
-                        unc_eps=args.opt_risk_eps,
-                        unc_power=args.opt_risk_power,
-                        unc_max_weight=args.opt_risk_max_weight,
+                        risk_eps=args.opt_risk_eps,
+                        risk_power=args.opt_risk_power,
+                        risk_max_weight=args.opt_risk_max_weight,
                     )
                     y0 = _fdk_temporal_y0(model, inp)
                     if y0 is not None:
@@ -1357,9 +1408,9 @@ def main():
                             target_pos=stage2_target_pos,
                             risk=unc if stage2_use_risk else None,
                             noisy_input=inp,
-                            unc_eps=args.opt_risk_eps,
-                            unc_power=args.opt_risk_power,
-                            unc_max_weight=args.opt_risk_max_weight,
+                            risk_eps=args.opt_risk_eps,
+                            risk_power=args.opt_risk_power,
+                            risk_max_weight=args.opt_risk_max_weight,
                         )
                     if stage2_use_perceptual:
                         loss = loss + args.perceptual_weight * _compute_perceptual_loss(
@@ -1406,9 +1457,9 @@ def main():
                         noise_cfg,
                         stage2_burst,
                         use_risk=stage2_use_risk,
-                        unc_eps=args.opt_risk_eps,
-                        unc_power=args.opt_risk_power,
-                        unc_max_weight=args.opt_risk_max_weight,
+                        risk_eps=args.opt_risk_eps,
+                        risk_power=args.opt_risk_power,
+                        risk_max_weight=args.opt_risk_max_weight,
                         perceptual_loss_fn=perceptual_loss_fn
                         if stage2_use_perceptual
                         else None,
@@ -1416,10 +1467,10 @@ def main():
                         if stage2_use_perceptual
                         else 0.0,
                         opt_l1_weight=args.opt_l1_weight
-                        if stage2_mode == "opt+r"
+                        if stage2_mode == "opt"
                         else 0.0,
                         opt_ssim_weight=args.opt_ssim_weight
-                        if stage2_mode == "opt+r"
+                        if stage2_mode == "opt"
                         else 0.0,
                         target_pos=stage2_target_pos,
                         max_samples=stage2_val_max_samples,
@@ -1490,15 +1541,27 @@ def main():
             opt_label_root=None,
             use_opt_risk=False,
             opt_label_jitter=0.0,
+            train_patient_frame_budget=cardiac_patient_train_budget,
+            train_patient_seed=args.seed,
+            val_patient_frame_budget=cardiac_patient_val_budget,
+            val_patient_seed=cardiac_patient_val_seed,
         )
         wgan_max_batches = _resolve_max_train_batches(
             train_loader, args.train_batch_fraction
         )
-        wgan_max_samples = _resolve_sample_budget(
-            args.max_train_samples_per_epoch, len(train_loader.dataset)
+        wgan_max_samples = (
+            None
+            if cardiac_patient_train_budget is not None
+            else _resolve_sample_budget(
+                args.max_train_samples_per_epoch, len(train_loader.dataset)
+            )
         )
-        wgan_val_max_samples = _resolve_sample_budget(
-            args.max_val_samples_per_epoch, len(val_loader.dataset)
+        wgan_val_max_samples = (
+            None
+            if cardiac_patient_val_budget is not None
+            else _resolve_sample_budget(
+                args.max_val_samples_per_epoch, len(val_loader.dataset)
+            )
         )
         if wgan_max_samples is not None:
             print(
@@ -1510,10 +1573,11 @@ def main():
                 f"[info] Val sample budget per epoch: "
                 f"{wgan_val_max_samples}/{len(val_loader.dataset)}"
             )
-            if dataset_tag == "cardiac":
-                val_loader = _make_random_val_loader(
-                    val_loader, args.batch_size, args.num_workers
-                )
+        elif cardiac_patient_val_budget is not None:
+            print(
+                f"[info] Val sample budget per epoch (patient-level): "
+                f"{cardiac_patient_val_budget}/{len(val_loader.dataset)}"
+            )
         discriminator = WGANVGGDiscriminator(
             input_size=int(args.patch_size), in_channels=args.in_channels
         ).to(device)
@@ -1569,9 +1633,9 @@ def main():
                     noise_cfg,
                     burst_size,
                     use_risk=False,
-                    unc_eps=args.opt_risk_eps,
-                    unc_power=args.opt_risk_power,
-                    unc_max_weight=args.opt_risk_max_weight,
+                    risk_eps=args.opt_risk_eps,
+                    risk_power=args.opt_risk_power,
+                    risk_max_weight=args.opt_risk_max_weight,
                     perceptual_loss_fn=None,
                     perceptual_weight=0.0,
                     opt_l1_weight=0.0,
@@ -1591,7 +1655,7 @@ def main():
             args.video_burst if args.model.lower() in {"fastdvdnet", "edvr"} else 1
         )
         pretrain = args.mode == "pretrain"
-        use_risk = args.opt_use_risk if args.mode == "opt+r" else False
+        use_risk = args.opt_use_risk if args.mode == "opt" else False
         use_perceptual = _use_perceptual(args.mode, args.perceptual_weight)
 
         train_loader, val_loader, _ = get_dataloaders(
@@ -1605,18 +1669,30 @@ def main():
             noise_cfg=noise_cfg,
             burst_size=burst_size,
             pretrain=pretrain,
-            opt_label_root=args.opt_label_root if args.mode == "opt+r" else None,
+            opt_label_root=args.opt_label_root if args.mode == "opt" else None,
             use_opt_risk=use_risk,
-            opt_label_jitter=args.opt_label_jitter if args.mode == "opt+r" else 0.0,
+            opt_label_jitter=args.opt_label_jitter if args.mode == "opt" else 0.0,
+            train_patient_frame_budget=cardiac_patient_train_budget,
+            train_patient_seed=args.seed,
+            val_patient_frame_budget=cardiac_patient_val_budget,
+            val_patient_seed=cardiac_patient_val_seed,
         )
         max_train_batches = _resolve_max_train_batches(
             train_loader, args.train_batch_fraction
         )
-        max_train_samples = _resolve_sample_budget(
-            args.max_train_samples_per_epoch, len(train_loader.dataset)
+        max_train_samples = (
+            None
+            if cardiac_patient_train_budget is not None
+            else _resolve_sample_budget(
+                args.max_train_samples_per_epoch, len(train_loader.dataset)
+            )
         )
-        val_max_samples = _resolve_sample_budget(
-            args.max_val_samples_per_epoch, len(val_loader.dataset)
+        val_max_samples = (
+            None
+            if cardiac_patient_val_budget is not None
+            else _resolve_sample_budget(
+                args.max_val_samples_per_epoch, len(val_loader.dataset)
+            )
         )
         if max_train_samples is not None:
             print(
@@ -1628,10 +1704,11 @@ def main():
                 f"[info] Val sample budget per epoch: "
                 f"{val_max_samples}/{len(val_loader.dataset)}"
             )
-            if dataset_tag == "cardiac":
-                val_loader = _make_random_val_loader(
-                    val_loader, args.batch_size, args.num_workers
-                )
+        elif cardiac_patient_val_budget is not None:
+            print(
+                f"[info] Val sample budget per epoch (patient-level): "
+                f"{cardiac_patient_val_budget}/{len(val_loader.dataset)}"
+            )
 
         opt = Adam([p for p in model.parameters() if p.requires_grad], lr=args.lr)
         step_size = _resolve_lr_step_size(
@@ -1653,13 +1730,13 @@ def main():
                 burst_size,
                 opt,
                 use_risk=use_risk,
-                unc_eps=args.opt_risk_eps,
-                unc_power=args.opt_risk_power,
-                unc_max_weight=args.opt_risk_max_weight,
+                risk_eps=args.opt_risk_eps,
+                risk_power=args.opt_risk_power,
+                risk_max_weight=args.opt_risk_max_weight,
                 perceptual_loss_fn=perceptual_loss_fn if use_perceptual else None,
                 perceptual_weight=args.perceptual_weight if use_perceptual else 0.0,
-                opt_l1_weight=args.opt_l1_weight if args.mode == "opt+r" else 0.0,
-                opt_ssim_weight=args.opt_ssim_weight if args.mode == "opt+r" else 0.0,
+                opt_l1_weight=args.opt_l1_weight if args.mode == "opt" else 0.0,
+                opt_ssim_weight=args.opt_ssim_weight if args.mode == "opt" else 0.0,
                 scheduler=scheduler,
                 max_batches=max_train_batches,
                 max_samples=max_train_samples,
@@ -1673,13 +1750,13 @@ def main():
                     noise_cfg,
                     burst_size,
                     use_risk=use_risk,
-                    unc_eps=args.opt_risk_eps,
-                    unc_power=args.opt_risk_power,
-                    unc_max_weight=args.opt_risk_max_weight,
+                    risk_eps=args.opt_risk_eps,
+                    risk_power=args.opt_risk_power,
+                    risk_max_weight=args.opt_risk_max_weight,
                     perceptual_loss_fn=perceptual_loss_fn if use_perceptual else None,
                     perceptual_weight=args.perceptual_weight if use_perceptual else 0.0,
-                    opt_l1_weight=args.opt_l1_weight if args.mode == "opt+r" else 0.0,
-                    opt_ssim_weight=args.opt_ssim_weight if args.mode == "opt+r" else 0.0,
+                    opt_l1_weight=args.opt_l1_weight if args.mode == "opt" else 0.0,
+                    opt_ssim_weight=args.opt_ssim_weight if args.mode == "opt" else 0.0,
                     max_samples=val_max_samples,
                 )
                 print(

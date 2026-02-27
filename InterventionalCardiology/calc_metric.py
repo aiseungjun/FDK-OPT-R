@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Subset
 
-from data import DEFAULT_LOW_DOSE_CFG, DenoiseDataset, get_frame_groups, get_noise_level
+from data import DEFAULT_LOW_DOSE_CFG, DenoiseDataset, get_noise_level
 from model import BM3D, FFDNet, FastDVDnet, NLM
 from train import build_model
 
@@ -49,6 +49,34 @@ def _infer_dataset_tag(root: Path, dataset_kind: str = "cardiac") -> str:
     raise ValueError(f"Could not infer cardiac dataset kind from root={root}")
 
 
+def _patient_key_from_sequence_key(seq_key: str, dataset_kind: str) -> str:
+    key = str(seq_key)
+    kind = str(dataset_kind).lower()
+    if kind == "cardiac":
+        parts = key.split("__")
+        if len(parts) >= 3:
+            return "__".join(parts[:-2])
+        return parts[0]
+    if "__" in key:
+        return key.split("__", 1)[0]
+    return key
+
+
+def _dataset_sample_patient_key(
+    ds: DenoiseDataset, sample_idx: int, dataset_kind: str
+) -> str:
+    burst_size = int(getattr(ds, "burst_size", 1))
+    if burst_size == 1:
+        ref = ds.index[int(sample_idx)]
+    else:
+        seq_key, _center_idx, indices = ds.windows[int(sample_idx)]
+        refs = ds.sequence_map[seq_key]
+        target_pos = int(getattr(ds, "burst_target_pos", burst_size // 2))
+        pos = min(max(target_pos, 0), len(indices) - 1)
+        ref = refs[int(indices[pos])]
+    return _patient_key_from_sequence_key(ref.dataset, dataset_kind)
+
+
 def _normalize_model_name(name: str) -> str:
     name = name.lower()
     if name == "red-cnn":
@@ -62,7 +90,7 @@ def _normalize_model_name(name: str) -> str:
 
 def _normalize_mode_alias(mode: str) -> str:
     mode = str(mode).lower()
-    if mode in {"opt+r"}:
+    if mode in {"opt", "optr", "opt+r"}:
         return "opt+r"
     return mode
 
@@ -479,19 +507,26 @@ def eval_split(
         burst_target=burst_target,
     )
     if sample_indices:
-        max_idx = int(max(sample_indices))
+        eval_indices = [int(i) for i in sample_indices]
+        max_idx = int(max(eval_indices))
         if max_idx >= len(ds):
             raise RuntimeError(
                 f"Sample index out of range for split={split}: max_idx={max_idx}, len={len(ds)}"
             )
-        ds = Subset(ds, list(sample_indices))
-    loader = DataLoader(ds, batch_size=1, shuffle=False)
+    else:
+        eval_indices = list(range(len(ds)))
+    subset = Subset(ds, eval_indices)
+    loader = DataLoader(subset, batch_size=1, shuffle=False)
+    patient_keys = [
+        _dataset_sample_patient_key(ds, sample_idx, dataset_kind)
+        for sample_idx in eval_indices
+    ]
 
-    psnr_vals = []
-    ssim_vals = []
+    patient_psnr: dict[str, list[float]] = {}
+    patient_ssim: dict[str, list[float]] = {}
     model.eval()
     with torch.no_grad():
-        for inp, target in loader:
+        for patient_key, (inp, target) in zip(patient_keys, loader):
             inp = inp.to(device)
             target = target.to(device)
             target_frame = _select_target_if_burst(target, burst_size, target_pos)
@@ -499,11 +534,21 @@ def eval_split(
             output = _select_target_if_burst(output, burst_size, target_pos)
             output = torch.clamp(output, 0.0, 1.0)
 
-            psnr_vals.append(psnr_torch(output, target_frame).item())
-            ssim_vals.append(ssim_torch(output, target_frame).item())
+            patient_psnr.setdefault(patient_key, []).append(
+                float(psnr_torch(output, target_frame).item())
+            )
+            patient_ssim.setdefault(patient_key, []).append(
+                float(ssim_torch(output, target_frame).item())
+            )
 
-    psnr_mean = sum(psnr_vals) / max(1, len(psnr_vals))
-    ssim_mean = sum(ssim_vals) / max(1, len(ssim_vals))
+    patient_psnr_means = [
+        float(sum(vals) / len(vals)) for vals in patient_psnr.values() if vals
+    ]
+    patient_ssim_means = [
+        float(sum(vals) / len(vals)) for vals in patient_ssim.values() if vals
+    ]
+    psnr_mean = sum(patient_psnr_means) / max(1, len(patient_psnr_means))
+    ssim_mean = sum(patient_ssim_means) / max(1, len(patient_ssim_means))
     return psnr_mean, ssim_mean
 
 
@@ -694,23 +739,11 @@ def main():
 
     summary_rows = []
     latency_cache: dict[tuple, float] = {}
-    test_max_samples = args.test_max_samples
     test_sample_indices: list[int] | None = None
-    if test_max_samples is not None and int(test_max_samples) > 0:
-        groups = get_frame_groups(
-            root=root_path, split="test", dataset_kind=dataset_tag, pretrain=False
-        )
-        total_test = sum(len(items) for items in groups.values())
-        if total_test <= 0:
-            raise RuntimeError(
-                f"No test frames found for dataset={dataset_tag} under root={root_path}"
-            )
-        sample_n = min(int(test_max_samples), int(total_test))
-        sample_seed = int(args.test_sample_seed)
-        rng = random.Random(sample_seed)
-        test_sample_indices = sorted(rng.sample(range(total_test), sample_n))
+    if args.test_max_samples is not None and int(args.test_max_samples) > 0:
         print(
-            f"[info] Using fixed test subset: {sample_n}/{total_test} frames (seed={sample_seed})."
+            f"[info] Ignoring --test_max_samples={int(args.test_max_samples)}; "
+            "paper_code metrics evaluate all test patients."
         )
 
     for name in build_model_entries(

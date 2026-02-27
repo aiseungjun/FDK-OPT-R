@@ -352,10 +352,10 @@ class FusionParams:
     gate_mad_pow: float = 1.0
     gate_diff_pow: float = 1.0
 
-    unc_var_scale: float = 0.004
-    unc_mad_scale: float = 0.020
-    unc_diff_scale: float = 0.050
-    unc_edge_weight: float = 0.06
+    risk_var_scale: float = 0.004
+    risk_mad_scale: float = 0.020
+    risk_diff_scale: float = 0.050
+    risk_edge_weight: float = 0.06
 
     stages: int = 2
     stage2_min_support: float = 0.20
@@ -607,8 +607,8 @@ def _fuse_frame_once(
     safe = np.clip(tgt_obs_roi + conf_eff * delta, 0.0, 1.0).astype(np.float32)
 
     var_safe = _weighted_var(stack_safe, w_safe, safe)
-    var_norm = np.clip(var_safe / (var_safe + float(params.unc_var_scale)), 0.0, 1.0)
-    mad_norm = np.clip(mad / (mad + float(params.unc_mad_scale)), 0.0, 1.0)
+    var_norm = np.clip(var_safe / (var_safe + float(params.risk_var_scale)), 0.0, 1.0)
+    mad_norm = np.clip(mad / (mad + float(params.risk_mad_scale)), 0.0, 1.0)
     u_safe = (0.45 * (1.0 - support) + 0.30 * mad_norm + 0.25 * var_norm).astype(
         np.float32
     )
@@ -631,8 +631,8 @@ def _fuse_frame_once(
         )
 
     var_ag = _weighted_var(warped_stack, w_ag, aggr)
-    var_ag_norm = np.clip(var_ag / (var_ag + float(params.unc_var_scale)), 0.0, 1.0)
-    mad2_norm = np.clip(mad2 / (mad2 + float(params.unc_mad_scale)), 0.0, 1.0)
+    var_ag_norm = np.clip(var_ag / (var_ag + float(params.risk_var_scale)), 0.0, 1.0)
+    mad2_norm = np.clip(mad2 / (mad2 + float(params.risk_mad_scale)), 0.0, 1.0)
     u_ag = (0.55 * (1.0 - support) + 0.25 * mad2_norm + 0.20 * var_ag_norm).astype(
         np.float32
     )
@@ -649,14 +649,14 @@ def _fuse_frame_once(
 
     label = (gate * aggr + (1.0 - gate) * safe).astype(np.float32)
 
-    u_diff = np.clip(diff / (diff + float(params.unc_diff_scale)), 0.0, 1.0).astype(
+    u_diff = np.clip(diff / (diff + float(params.risk_diff_scale)), 0.0, 1.0).astype(
         np.float32
     )
     unc = ((1.0 - gate) * u_safe + gate * u_ag + 0.25 * u_diff).astype(np.float32)
 
     unc = np.clip(
         unc
-        + float(params.unc_edge_weight) * _edge_strength(tgt_obs_roi) * (1.0 - support),
+        + float(params.risk_edge_weight) * _edge_strength(tgt_obs_roi) * (1.0 - support),
         0.0,
         1.0,
     )

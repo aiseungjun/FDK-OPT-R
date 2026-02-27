@@ -54,7 +54,7 @@ def _normalize_model_name(name: str) -> str:
 
 def _normalize_mode_alias(mode: str) -> str:
     mode = str(mode).lower()
-    if mode in {"opt+r"}:
+    if mode in {"opt", "optr", "opt+r"}:
         return "opt+r"
     return mode
 

@@ -125,7 +125,7 @@ class FDK(nn.Module):
     def _predict_residual(
         self, y0: torch.Tensor, v: torch.Tensor, target: torch.Tensor, mu: torch.Tensor
     ) -> torch.Tensor:
-        inp_lr = torch.cat([y0, v, target - mu], dim=1)
+        inp_lr = torch.cat([y0, v, torch.abs(target - mu)], dim=1)
         inp_lr = self._downsample(inp_lr)
         feat = self.lr_body(inp_lr)
         r_lr = self.lr_head(feat)

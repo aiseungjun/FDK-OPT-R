@@ -830,7 +830,7 @@ class DenoiseDataset(Dataset):
         self.opt_label_map = {}
         self.use_opt_risk = bool(use_opt_risk)
         self.opt_label_jitter = float(opt_label_jitter)
-        if self.mode == "opt+r":
+        if self.mode == "opt":
             if self.opt_label_root is None:
                 raise ValueError("opt_label_root must be provided for opt mode")
             self._load_opt_label_index()
@@ -868,7 +868,7 @@ class DenoiseDataset(Dataset):
             if not self.windows:
                 raise FileNotFoundError("No windows indexed")
 
-        if self.mode == "opt+r":
+        if self.mode == "opt":
             self._validate_opt_index_coverage()
             self._validate_opt_shape_alignment(sample_count=8)
 
@@ -907,7 +907,7 @@ class DenoiseDataset(Dataset):
                 if crop_attr is None:
                     raise RuntimeError(
                         f"Legacy opt-label file detected without black-border metadata: {path}. "
-                        "Regenerate opt labels with current opt_flow_generater.py."
+                        "Regenerate opt labels with opt_flow_generater.py."
                     )
                 if not bool(crop_attr):
                     raise RuntimeError(
@@ -920,7 +920,7 @@ class DenoiseDataset(Dataset):
                 if thr is None or min_run is None or min_size is None:
                     raise RuntimeError(
                         f"Opt-label file missing crop-parameter metadata: {path}. "
-                        "Regenerate opt labels with current opt_flow_generater.py."
+                        "Regenerate opt labels with opt_flow_generater.py."
                     )
                 if abs(float(thr) - float(BLACK_BORDER_THRESHOLD)) > 1e-8:
                     raise RuntimeError(
@@ -1085,7 +1085,7 @@ class DenoiseDataset(Dataset):
     def __getitem__(self, idx: int):
         if self.burst_size == 1:
             ref = self.index[idx]
-            if self.mode == "opt+r":
+            if self.mode == "opt":
                 raw = self._load_frame_raw(ref)
                 raw = _select_middle_channel(raw)
                 if raw.dim() == 2:
@@ -1122,7 +1122,7 @@ class DenoiseDataset(Dataset):
                 target = _r2r_corrupt(base.clone(), R2R_TARGET_STRENGTH)
                 return inp.squeeze(0), target.squeeze(0)
 
-            if self.mode == "opt+r":
+            if self.mode == "opt":
                 noisy = corrupt(clean_4d.clone(), self.noise_cfg)
                 label = self._load_opt_label(ref, bbox=bbox)
                 if crop_coords is not None:
@@ -1197,7 +1197,7 @@ class DenoiseDataset(Dataset):
             stack = torch.stack(frames, dim=0)
             return stack, crop_coords
 
-        if self.mode == "opt+r":
+        if self.mode == "opt":
             clean_stack, crop_coords = _load_stack_opt(indices)
         else:
             clean_stack = _load_stack(indices)
@@ -1248,7 +1248,7 @@ class DenoiseDataset(Dataset):
                 torch.stack(target_frames, dim=0).contiguous().clone(),
             )
 
-        if self.mode == "opt+r":
+        if self.mode == "opt":
             noisy_stack = _corrupt_stack(clean_stack)
             label = self._load_opt_label(target_ref, bbox=bbox)
             if crop_coords is not None:
@@ -1416,7 +1416,7 @@ def get_dataloaders(
     val_loader = DataLoader(
         val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers
     )
-    if mode == "opt+r":
+    if mode == "opt":
         test_loader = None
     else:
         test_ds = DenoiseDataset(

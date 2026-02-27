@@ -24,7 +24,7 @@ def _ckpt_entry(model: str, mode: str, dose_fraction: float, peak: float) -> str
 
 def _normalize_mode(mode: str) -> str:
     mode = str(mode).lower()
-    if mode in {"opt+r"}:
+    if mode in {"opt", "optr", "opt+r"}:
         return "opt+r"
     return mode
 
@@ -130,7 +130,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--models", nargs="*", choices=list(MODEL_SPECS), default=DEFAULT_MODELS
     )
     parser.add_argument(
-        "--mode", choices=["n2c", "opt+r"], default="opt+r"
+        "--mode", choices=["n2c", "opt+r", "opt", "optr"], default="opt+r"
     )
     parser.add_argument("--overwrite", action="store_true")
 
@@ -219,7 +219,7 @@ def _run_one(
     run_dir.mkdir(parents=True, exist_ok=True)
 
     mode = _normalize_mode(args.mode)
-    train_mode = "opt+r" if mode == "opt+r" else mode
+    train_mode = "opt" if mode == "opt+r" else mode
     use_opt_risk = mode == "opt+r"
     train_model = str(spec["train_model"])
     entry_mode = mode
@@ -272,7 +272,7 @@ def _run_one(
                 ]
             )
 
-        if train_mode == "opt+r":
+        if train_mode == "opt":
             train_cmd.extend(
                 [
                     "--opt_epochs",

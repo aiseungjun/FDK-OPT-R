@@ -14,7 +14,7 @@ import data
 from calc_metric import _infer_dataset_tag, load_model_entry, psnr_torch, ssim_torch
 from data_ood import OODDenoiseDataset, OODSpec
 
-DEFAULT_TEST_SAMPLE_COUNT = 500
+DEFAULT_TEST_SAMPLE_COUNT = 0
 DEFAULT_TEST_SAMPLE_SEED = 2026
 
 
@@ -151,12 +151,12 @@ def main() -> None:
     peak_tag = _fmt_float(peak)
 
     methods: List[Tuple[str, str]] = [
-        ("FDK-OPT+R", f"fdk-opt+r-{dose_tag}-{peak_tag}"),
+        ("FDK-OPT+R", f"fdk-optr-{dose_tag}-{peak_tag}"),
         ("UNet-N2V", f"unet-n2v-{dose_tag}-{peak_tag}"),
         ("UNet-R2R", f"unet-r2r-{dose_tag}-{peak_tag}"),
         ("NAFNet", f"nafnet-n2c-{dose_tag}-{peak_tag}"),
         ("UNet-N2C", f"unet-n2c-{dose_tag}-{peak_tag}"),
-        ("UNet-OPT+R", f"unet-opt+r-{dose_tag}-{peak_tag}"),
+        ("UNet-OPT+R", f"unet-optr-{dose_tag}-{peak_tag}"),
     ]
 
     ood_grid: List[Tuple[str, List[float]]] = [

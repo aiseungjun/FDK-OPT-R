@@ -7,9 +7,10 @@ from pathlib import Path
 from data import DEFAULT_LOW_DOSE_CFG
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
 TRAIN_BATCH_FRACTION = 1.0
 EXPERIMENT_SEEDS = [1337, 6324, 2346, 7352, 2734]
+CARDIAC_TRAIN_FRAME_BUDGET = 3000
+CARDIAC_VAL_FRAME_BUDGET = 500
 
 
 def _fmt_float(value: float) -> str:
@@ -39,7 +40,7 @@ def _infer_dataset_kind(root: Path, dataset: str) -> str:
 
 def _normalize_mode(mode: str) -> str:
     mode = str(mode).lower()
-    if mode in {"opt+r"}:
+    if mode in {"opt", "optr", "opt+r"}:
         return "opt+r"
     return mode
 
@@ -75,7 +76,7 @@ def _train_one(
     extra: list[str] | None = None,
 ) -> None:
     mode_tag = _normalize_mode(mode)
-    train_mode = "opt+r" if mode_tag == "opt+r" else mode_tag
+    train_mode = "opt" if mode_tag == "opt+r" else mode_tag
     cmd = [
         sys.executable,
         str(SCRIPT_DIR / "train.py"),
@@ -117,12 +118,14 @@ def _train_one(
         str(TRAIN_BATCH_FRACTION),
     ]
     if dataset_kind == "cardiac":
-        cmd.extend([
-            "--max_train_samples_per_epoch",
-            "1500",
-            "--max_val_samples_per_epoch",
-            "500",
-        ])
+        cmd.extend(
+            [
+                "--max_train_samples_per_epoch",
+                str(CARDIAC_TRAIN_FRAME_BUDGET),
+                "--max_val_samples_per_epoch",
+                str(CARDIAC_VAL_FRAME_BUDGET),
+            ]
+        )
     if model == "fdk":
         cmd.extend(
             [
@@ -306,13 +309,18 @@ def main() -> None:
         fdk_epochs = int(opt_epochs)
 
         if not args.skip_opt_label:
-            opt_flow_dataset = "cardio" if dataset == "cardiac" else dataset
-            _run([
-                sys.executable,
-                str(REPO_ROOT / "opt_flow_generater.py"),
-                "--datasets",
-                opt_flow_dataset,
-            ])
+            paper_root = root.parent
+            _run(
+                [
+                    sys.executable,
+                    str(paper_root / "opt_flow_generater.py"),
+                    "--root",
+                    str(paper_root),
+                    "--datasets",
+                    "cardio",
+                ]
+            )
+
         for run_idx, run_seed in enumerate(run_seeds, start=1):
             print(f"[info] [{run_idx}/{len(run_seeds)}] running with seed={run_seed}")
 

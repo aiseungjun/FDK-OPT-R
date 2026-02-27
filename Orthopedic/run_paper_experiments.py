@@ -7,7 +7,6 @@ from pathlib import Path
 from data import DEFAULT_LOW_DOSE_CFG
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-REPO_ROOT = SCRIPT_DIR.parent
 EXPERIMENT_SEEDS = [1337, 6324, 2346, 7352, 2734]
 
 
@@ -23,7 +22,7 @@ def _run(cmd: list[str]) -> None:
 
 def _normalize_mode(mode: str) -> str:
     mode = str(mode).lower()
-    if mode in {"opt+r"}:
+    if mode in {"opt", "optr", "opt+r"}:
         return "opt+r"
     return mode
 
@@ -57,7 +56,7 @@ def _train_one(
     extra: list[str] | None = None,
 ) -> None:
     mode_tag = _normalize_mode(mode)
-    train_mode = "opt+r" if mode_tag == "opt+r" else mode_tag
+    train_mode = "opt" if mode_tag == "opt+r" else mode_tag
     cmd = [
         sys.executable,
         str(SCRIPT_DIR / "train.py"),
@@ -244,12 +243,18 @@ def main() -> None:
         fdk_epochs = int(args.opt_epochs)
 
         if not args.skip_opt_label:
-            _run([
-                sys.executable,
-                str(REPO_ROOT / "opt_flow_generater.py"),
-                "--datasets",
-                dataset,
-            ])
+            paper_root = root.parent
+            _run(
+                [
+                    sys.executable,
+                    str(paper_root / "opt_flow_generater.py"),
+                    "--root",
+                    str(paper_root),
+                    "--datasets",
+                    dataset,
+                ]
+            )
+
         for run_idx, run_seed in enumerate(run_seeds, start=1):
             print(f"[info] [{run_idx}/{len(run_seeds)}] running with seed={run_seed}")
 

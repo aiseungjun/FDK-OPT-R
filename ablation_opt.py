@@ -18,7 +18,7 @@ import torch
 ROOT = Path(__file__).resolve().parent
 os.environ.setdefault("HDF5_USE_FILE_LOCKING", "FALSE")
 
-CARDIO_MAX_SAMPLES_TOTAL = 1000
+CARDIO_MAX_SAMPLES_TOTAL = 2000
 
 
 @dataclass(frozen=True)
@@ -164,7 +164,7 @@ def _build_opt_dataset(cfg: DatasetConfig, data_mod: ModuleType, split: str) -> 
         root=str(cfg.repo),
         split=split,
         patch_size=None,
-        mode="opt+r",
+        mode="opt",
         in_channels=1,
         noise_cfg=dict(data_mod.DEFAULT_LOW_DOSE_CFG),
         dataset_kind=cfg.dataset_kind,
