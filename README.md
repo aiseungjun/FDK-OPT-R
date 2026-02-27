@@ -1,4 +1,4 @@
-# FDK-OPT+R: Teacher-Free Real-Time<br>Low-Dose Fluoroscopy Denoising via<br>Risk-Calibrated Pseudo Supervision and<br>Kalman-Form Fusion
+# FDK-OPT+R: Teacher-Free Real-Time<br>Low-Dose Fluoroscopy Denoising via Risk-Calibrated Pseudo Supervision and Kalman-Form Fusion
 
 Public release code for the paper experiments.
 
@@ -11,19 +11,6 @@ Public release code for the paper experiments.
 - h5py: `3.13.0`
 - Pillow: `11.0.0`
 - SciPy: `1.15.2`
-
-## Current experiment policy in this release
-- Paper pseudo-supervision mode is `opt+r`.
-- Aliases `opt` and `optr` are accepted but normalized to `opt+r`.
-- `n2n` is removed from this release.
-- Main experiment seeds are fixed to: `1337, 6324, 2346, 7352, 2734`.
-- Resolution/patch policy:
-  - `weiss`: `256x256` pipeline.
-  - `cardio`: `256x256` pipeline.
-- Cardio reporting policy:
-  - train/val sample budgets are `3000 / 500` per epoch (patient-level accumulation; last patient trimmed from the end).
-  - validation evaluation is enabled in training loops.
-  - main paper test evaluation uses the full test set (not fixed 500 subset).
 
 ## Repository layout
 ```text
